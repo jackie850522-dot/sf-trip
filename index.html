@@ -49,6 +49,14 @@
         }
         .save-indicator.show { opacity: 1; }
 
+        /* 雲端狀態標籤 */
+        .cloud-status {
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 10px; padding: 2px 8px; border-radius: 10px; margin-top: 6px;
+            background: #E5E5EA; color: #8E8E93; transition: all 0.3s;
+        }
+        .cloud-status.active { background: #E8F5E9; color: #2E7D32; }
+
         .container { padding: 20px 16px; max-width: 600px; margin: 0 auto; }
         
         .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
@@ -140,7 +148,8 @@
         <header>
             <h1>舊金山大圓環之旅</h1>
             <p class="subtitle">3/27 - 4/05 (9 Days)</p>
-            <div id="save-indicator" class="save-indicator"><i class="fa-solid fa-cloud-arrow-up"></i> 已儲存</div>
+            <div id="cloud-status-badge" class="cloud-status"><i class="fa-solid fa-cloud-arrow-down" style="margin-right: 4px;"></i> 本地模式 (未連線)</div>
+            <div id="save-indicator" class="save-indicator"><i class="fa-solid fa-check-circle"></i> 已同步</div>
         </header>
     </div>
 
@@ -159,6 +168,7 @@
 
         <div id="app-content">
             <!-- 內容由 JS 動態生成 -->
+            <div style="text-align: center; padding: 40px; color: #8E8E93;"><i class="fa-solid fa-spinner fa-spin"></i> 載入行程中...</div>
         </div>
 
         <div class="footer-note">
@@ -181,10 +191,36 @@
         </div>
     </div>
 
-    <script>
+    <!-- 模組化載入 Firebase 核心 SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // ==========================================
+        // 🚀 步驟 1：請在這裡貼上你的 Firebase Config
+        // ==========================================
+        const myFirebaseConfig = {
+            apiKey: "YOUR_API_KEY", // <--- 替換成你的 API Key
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.firebasestorage.app",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
         const STORAGE_KEY = 'sf_itinerary_data_v2';
+        const FIRESTORE_DOC_ID = 'trip-sf-2026';
         
-        // 原始預設行程
+        let itinerary = [];
+        let expandedDays = ['day-3-27'];
+        let editingItemId = null;
+        let saveTimeout = null;
+        let isCloudActive = false;
+        
+        let db, auth;
+
+        // 系統預設行程
         const defaultItinerary = [
             {
                 id: "day-3-27", day: "FRI", date: "27", title: "抵達舊金山", subtitle: "SFO Arrival", transportBadge: { text: "不租車", type: "badge-nocar" },
@@ -201,7 +237,7 @@
                     { id: "328-5", time: "15:00", title: "倫巴底街 (九曲花街)", desc: "搭車至頂端往下走", gmaps: "https://maps.app.goo.gl/Tkr67d9ETbqNZHoe9?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
                     { id: "328-2", time: "16:30", title: "藝術宮", desc: "散步拍照", gmaps: "https://maps.app.goo.gl/jEdtG9TZm31oKkdY7?g_st=ic", notes: "", driveTime: "約 30 分鐘" },
                     { id: "328-6", time: "21:00", title: "AVIS 取車", desc: "辦理租車手續", gmaps: "https://maps.app.goo.gl/fFTxp4G9Nc9Zciw5A?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
-                    { id: "328-7", time: "22:00", title: "住宿 The Millwood - A Boutique Hotel", desc: "1375 El Camino Real, Millbrae", gmaps: "https://maps.app.goo.gl/4xNHmmWKMj2NcV258?g_st=ic", booking: "https://www.booking.com/hotel/us/millwood-inn-suites.zh-tw.html", notes: "", driveTime: "", isHotel: true }
+                    { id: "328-7", time: "22:00", title: "住宿 The Millwood", desc: "返回飯店", gmaps: "https://maps.app.goo.gl/4xNHmmWKMj2NcV258?g_st=ic", booking: "", notes: "", driveTime: "", isHotel: true }
                 ]
             },
             {
@@ -217,9 +253,7 @@
                 id: "day-3-30", day: "MON", date: "30", title: "優勝美地", subtitle: "Yosemite National Park", transportBadge: { text: "開車自駕", type: "badge-car" },
                 items: [
                     { id: "330-1", time: "08:30", title: "優勝美地入口", desc: "Big Oak Flat Entrance", gmaps: "https://maps.app.goo.gl/Zi6peo5z6KH9y6Nb7?g_st=ic", notes: "", driveTime: "約 45 分鐘" },
-                    { id: "330-2", time: "09:30", title: "Tunnel View", desc: "經典山谷視角", gmaps: "https://maps.app.goo.gl/4MCniqnLPVm9Hfgb9?g_st=ic", notes: "", driveTime: "約 10 分鐘" },
                     { id: "330-3", time: "10:30", title: "Bridalveil Fall & El Capitan", desc: "新娘面紗瀑布與酋長岩", gmaps: "https://maps.app.goo.gl/zaEBGVHgFHXXZAKV9?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
-                    { id: "330-5", time: "12:00", title: "Yosemite Valley Welcome Center", desc: "谷地中心休息/午餐", gmaps: "https://maps.app.goo.gl/XCcBygV6g2ZoGFjE6?g_st=ic", notes: "", driveTime: "約 4.5 小時" },
                     { id: "330-6", time: "18:00", title: "住宿 Hampton Inn Bakersfield", desc: "中繼站休息", gmaps: "https://maps.app.goo.gl/Hb4imYVAMfBCJF8ZA?g_st=ic", booking: "https://www.booking.com/Share-TngOsfG", notes: "", driveTime: "", isHotel: true }
                 ]
             },
@@ -227,8 +261,6 @@
                 id: "day-3-31", day: "TUE", date: "31", title: "前進賭城", subtitle: "Las Vegas", transportBadge: { text: "開車自駕", type: "badge-car" },
                 items: [
                     { id: "331-1", time: "09:00", title: "出發前往拉斯維加斯", desc: "長途移動", gmaps: "", notes: "", driveTime: "約 4.5 小時" },
-                    { id: "331-3", time: "14:00", title: "賭城大道 Las Vegas Strip", desc: "市區觀光與吃午餐", gmaps: "https://maps.app.goo.gl/2fhijHML9xTVS3q77?g_st=ic", notes: "", driveTime: "約 10 分鐘" },
-                    { id: "331-2", time: "16:00", title: "Sphere 球體建築", desc: "看外觀拍照", gmaps: "https://maps.app.goo.gl/acCcBSEaUSt6ECfA8?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
                     { id: "331-4", time: "20:00", title: "百樂宮噴泉", desc: "晚上看水舞秀", gmaps: "https://maps.app.goo.gl/odVB7j2B6s9mvmk48?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
                     { id: "331-5", time: "21:30", title: "住宿 Luxurious House With A Pool", desc: "賭城包棟住宿", gmaps: "https://maps.app.goo.gl/a6mhMsUwvT4MHVeN9?g_st=ic", booking: "https://www.booking.com/Share-07S9d7", notes: "", driveTime: "", isHotel: true }
                 ]
@@ -237,8 +269,6 @@
                 id: "day-4-1", day: "WED", date: "01", title: "大峽谷", subtitle: "Grand Canyon", transportBadge: { text: "開車自駕", type: "badge-car" },
                 items: [
                     { id: "401-1", time: "08:00", title: "大峽谷南端入口處", desc: "開車前往", gmaps: "https://maps.app.goo.gl/T4tjM1hPLAQr3xww8?g_st=ic", notes: "", driveTime: "約 15 分鐘" },
-                    { id: "401-2", time: "13:00", title: "Yavapai & Mather Point", desc: "壯麗峽谷觀景點", gmaps: "https://maps.app.goo.gl/JQPELYSjGAB3N4bbA?g_st=ic", notes: "", driveTime: "約 45 分鐘" },
-                    { id: "401-4", time: "16:00", title: "Desert View Watchtower", desc: "看夕陽絕佳地點", gmaps: "https://maps.app.goo.gl/qsjSUi9z86xdVUZ86?g_st=ic", notes: "", driveTime: "約 2.5 小時" },
                     { id: "401-5", time: "19:30", title: "住宿 3Bd, King, Brkfst, Sleeps 11", desc: "Page 鎮上住宿", gmaps: "https://maps.app.goo.gl/Jirf437soy9LzavR6?g_st=ic", booking: "https://www.booking.com/Share-W6Xksc", notes: "", driveTime: "", isHotel: true }
                 ]
             },
@@ -264,78 +294,223 @@
                 items: [
                     { id: "404-1", time: "09:00", title: "史丹佛大學 Stanford University", desc: "校園巡禮", gmaps: "https://maps.app.goo.gl/8DjjZQohKUNknpeW9?g_st=ic", notes: "", driveTime: "約 25 分鐘" },
                     { id: "404-2", time: "11:00", title: "Apple Park", desc: "訪客中心買紀念品", gmaps: "https://maps.app.goo.gl/KQytvajonFv5JhuU9?g_st=ic", notes: "", driveTime: "約 1.5 小時" },
-                    { id: "404-3", time: "14:00", title: "卡梅爾海 & 17 Mile Dr", desc: "Carmel-by-the-Sea 藝術小鎮", gmaps: "https://maps.app.goo.gl/vWkLfuWp48GC1PKLA?g_st=ic", notes: "", driveTime: "約 30 分鐘" },
-                    { id: "404-4", time: "16:00", title: "Bixby Bridge", desc: "一號公路經典地標", gmaps: "https://maps.app.goo.gl/RY1NxNm6YvtoGQe59?g_st=ic", notes: "", driveTime: "約 2.5 小時" },
                     { id: "404-5", time: "20:30", title: "AVIS 還車", desc: "機場還車", gmaps: "https://maps.app.goo.gl/fFTxp4G9Nc9Zciw5A?g_st=ic", notes: "", driveTime: "約 10 分鐘" },
                     { id: "404-6", time: "00:50", title: "4/5 搭機回台北", desc: "SFO 飛往 TPE (JX011)", gmaps: "", notes: "", driveTime: "", isHotel: true }
                 ]
             }
         ];
 
-        // 狀態變數
-        let itinerary = [];
-        let expandedDays = ['day-3-27'];
-        let editingItemId = null;
-        let saveTimeout = null;
+        // 系統環境判斷 (Canvas vs GitHub)
+        const isCanvas = typeof __firebase_config !== 'undefined';
+        const configToUse = isCanvas ? JSON.parse(__firebase_config) : myFirebaseConfig;
+        const appId = isCanvas ? __app_id : 'default-app-id';
+        const docPath = isCanvas ? `artifacts/${appId}/public/data/itineraries` : 'itineraries';
 
-        // 自訂 Alert 功能變數
-        let alertCallback = null;
+        // 初始化
+        async function initApp() {
+            // 判斷是否填寫了有效的 Firebase API Key
+            if (configToUse.apiKey === "YOUR_API_KEY") {
+                console.log("未檢測到 Firebase API Key，使用本地模式");
+                initLocalData();
+                return;
+            }
 
-        // 初始化：讀取 iPhone/瀏覽器的 LocalStorage
-        function initData() {
-            const savedData = localStorage.getItem(STORAGE_KEY);
-            if (savedData) {
+            try {
+                const app = initializeApp(configToUse);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // 優先使用 Canvas 自訂 Token，否則嘗試匿名登入
+                if (isCanvas && typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        isCloudActive = true;
+                        updateCloudStatus(true);
+                        setupCloudListener();
+                    } else {
+                        initLocalData();
+                    }
+                });
+            } catch (error) {
+                console.error("Firebase 初始化失敗，降級為本地模式:", error);
+                initLocalData();
+            }
+        }
+
+        function updateCloudStatus(isActive) {
+            const badge = document.getElementById('cloud-status-badge');
+            if (isActive) {
+                badge.classList.add('active');
+                badge.innerHTML = '<i class="fa-solid fa-cloud" style="margin-right: 4px;"></i> 雲端即時同步中';
+            } else {
+                badge.classList.remove('active');
+                badge.innerHTML = '<i class="fa-solid fa-cloud-arrow-down" style="margin-right: 4px;"></i> 本地模式 (未連線)';
+            }
+        }
+
+        // 監聽雲端資料變動
+        function setupCloudListener() {
+            const docRef = doc(db, docPath, FIRESTORE_DOC_ID);
+            onSnapshot(docRef, (snapshot) => {
+                if (snapshot.exists()) {
+                    itinerary = snapshot.data().items;
+                    // 如果用戶沒有在編輯中，才重新渲染畫面，避免干擾打字
+                    if (!editingItemId && document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'INPUT') {
+                        render();
+                    }
+                } else {
+                    // 第一次初始化資料庫
+                    itinerary = getLocalData() || JSON.parse(JSON.stringify(defaultItinerary));
+                    setDoc(docRef, { items: itinerary });
+                    render();
+                }
+            }, (error) => {
+                console.error("讀取雲端失敗:", error);
+                initLocalData();
+            });
+        }
+
+        // 儲存資料總控
+        window.saveData = async () => {
+            if (isCloudActive && auth.currentUser) {
                 try {
-                    itinerary = JSON.parse(savedData);
-                } catch(e) {
-                    itinerary = JSON.parse(JSON.stringify(defaultItinerary));
+                    const docRef = doc(db, docPath, FIRESTORE_DOC_ID);
+                    await setDoc(docRef, { items: itinerary });
+                    showSaveIndicator();
+                } catch (e) {
+                    console.error("雲端儲存失敗:", e);
+                    saveLocalData();
                 }
             } else {
-                itinerary = JSON.parse(JSON.stringify(defaultItinerary));
+                saveLocalData();
             }
+        };
+
+        // 本地模式操作
+        function getLocalData() {
+            const savedData = localStorage.getItem(STORAGE_KEY);
+            return savedData ? JSON.parse(savedData) : null;
+        }
+        function saveLocalData() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(itinerary));
+            showSaveIndicator();
+        }
+        function initLocalData() {
+            isCloudActive = false;
+            updateCloudStatus(false);
+            itinerary = getLocalData() || JSON.parse(JSON.stringify(defaultItinerary));
             render();
         }
 
-        // 儲存資料到手機
-        window.saveDataToLocal = () => {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(itinerary));
-            showSaveIndicator();
-        };
-
-        // 顯示已儲存提示動畫
         function showSaveIndicator() {
             const ind = document.getElementById('save-indicator');
             ind.classList.add('show');
             if (saveTimeout) clearTimeout(saveTimeout);
-            saveTimeout = setTimeout(() => {
-                ind.classList.remove('show');
-            }, 2000);
+            saveTimeout = setTimeout(() => ind.classList.remove('show'), 2000);
         }
 
-        // 防 XSS
         function escapeHtml(unsafe) {
             if(!unsafe) return '';
             return unsafe.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
         }
 
-        // 自訂 iOS Alert 視窗
+        // ==========================================
+        // 綁定所有操作事件 (暴露給 Window 以供 HTML 呼叫)
+        // ==========================================
+        window.toggleDay = (id) => {
+            if (expandedDays.includes(id)) expandedDays = expandedDays.filter(d => d !== id);
+            else expandedDays.push(id);
+            render();
+        };
+
+        window.startEdit = (itemId) => { editingItemId = itemId; render(); };
+        window.cancelEdit = () => { editingItemId = null; render(); };
+
+        window.saveEdit = (dayId, itemId) => {
+            const day = itinerary.find(d => d.id === dayId);
+            const item = day.items.find(i => i.id === itemId);
+            item.time = document.getElementById('edit-time').value;
+            item.title = document.getElementById('edit-title').value;
+            item.desc = document.getElementById('edit-desc').value;
+            item.driveTime = document.getElementById('edit-driveTime').value;
+            item.gmaps = document.getElementById('edit-gmaps').value;
+            item.booking = document.getElementById('edit-booking').value;
+            editingItemId = null;
+            window.saveData();
+            render();
+        };
+
+        window.updateNote = (dayId, itemId, value) => {
+            const day = itinerary.find(d => d.id === dayId);
+            const item = day.items.find(i => i.id === itemId);
+            if (item && item.notes !== value) {
+                item.notes = value;
+                window.saveData(); 
+            }
+        };
+
+        window.insertItem = (dayId, index) => {
+            const day = itinerary.find(d => d.id === dayId);
+            const newItem = { id: `new-${Date.now()}`, time: "00:00", title: "新行程", desc: "", gmaps: "", booking: "", notes: "", driveTime: "", isHotel: false };
+            day.items.splice(index, 0, newItem);
+            editingItemId = newItem.id;
+            window.saveData();
+            render();
+        };
+
+        window.deleteItem = (dayId, itemId) => {
+            window.showAlert("刪除行程", "確定要刪除這個行程嗎？這將無法復原。", "刪除", function(confirmed) {
+                if (!confirmed) return;
+                const day = itinerary.find(d => d.id === dayId);
+                day.items = day.items.filter(i => i.id !== itemId);
+                editingItemId = null;
+                window.saveData();
+                render();
+            });
+        };
+
+        window.moveItem = (dayId, index, direction) => {
+            const day = itinerary.find(d => d.id === dayId);
+            if (direction === 'up' && index > 0) {
+                [day.items[index - 1], day.items[index]] = [day.items[index], day.items[index - 1]];
+            } else if (direction === 'down' && index < day.items.length - 1) {
+                [day.items[index], day.items[index + 1]] = [day.items[index + 1], day.items[index]];
+            }
+            window.saveData();
+            render();
+        };
+
+        window.resetData = () => {
+            window.showAlert("重置所有行程", "確定要清除所有修改，恢復成預設行程嗎？", "重置", function(confirmed) {
+                if (!confirmed) return;
+                itinerary = JSON.parse(JSON.stringify(defaultItinerary));
+                window.saveData();
+                render();
+            });
+        };
+
+        // UI 自訂 Alert
         window.showAlert = (title, msg, confirmText, callback) => {
             document.getElementById('alert-title').innerText = title;
             document.getElementById('alert-msg').innerText = msg;
             document.getElementById('alert-confirm-btn').innerText = confirmText;
-            alertCallback = callback;
+            window.alertCallback = callback;
             document.getElementById('custom-alert').classList.add('show');
         };
 
         window.closeAlert = (confirmed) => {
             document.getElementById('custom-alert').classList.remove('show');
-            if (alertCallback) {
-                alertCallback(confirmed);
-                alertCallback = null;
-            }
+            if (window.alertCallback) { window.alertCallback(confirmed); window.alertCallback = null; }
         };
 
-        // 渲染畫面
+        // ==========================================
+        // 渲染畫面邏輯
+        // ==========================================
         function render() {
             const container = document.getElementById('app-content');
             let html = '';
@@ -356,7 +531,6 @@
                         </div>
                         <i class="fa-solid fa-chevron-down toggle-icon"></i>
                     </div>
-                    
                     <div class="day-content">
                 `;
 
@@ -462,83 +636,9 @@
             </div>`;
         }
 
-        // 綁定所有操作事件
-        window.toggleDay = (id) => {
-            if (expandedDays.includes(id)) expandedDays = expandedDays.filter(d => d !== id);
-            else expandedDays.push(id);
-            render();
-        };
-
-        window.startEdit = (itemId) => { editingItemId = itemId; render(); };
-        window.cancelEdit = () => { editingItemId = null; render(); };
-
-        window.saveEdit = (dayId, itemId) => {
-            const day = itinerary.find(d => d.id === dayId);
-            const item = day.items.find(i => i.id === itemId);
-            item.time = document.getElementById('edit-time').value;
-            item.title = document.getElementById('edit-title').value;
-            item.desc = document.getElementById('edit-desc').value;
-            item.driveTime = document.getElementById('edit-driveTime').value;
-            item.gmaps = document.getElementById('edit-gmaps').value;
-            item.booking = document.getElementById('edit-booking').value;
-            editingItemId = null;
-            window.saveDataToLocal();
-            render();
-        };
-
-        window.updateNote = (dayId, itemId, value) => {
-            const day = itinerary.find(d => d.id === dayId);
-            const item = day.items.find(i => i.id === itemId);
-            if (item && item.notes !== value) {
-                item.notes = value;
-                window.saveDataToLocal(); // 更新備註後立刻存入手機
-            }
-        };
-
-        window.insertItem = (dayId, index) => {
-            const day = itinerary.find(d => d.id === dayId);
-            const newItem = {
-                id: `new-${Date.now()}`,
-                time: "00:00", title: "新行程", desc: "", gmaps: "", booking: "", notes: "", driveTime: "", isHotel: false
-            };
-            day.items.splice(index, 0, newItem);
-            editingItemId = newItem.id;
-            window.saveDataToLocal();
-            render();
-        };
-
-        window.deleteItem = (dayId, itemId) => {
-            window.showAlert("刪除行程", "確定要刪除這個行程嗎？這將無法復原。", "刪除", function(confirmed) {
-                if (!confirmed) return;
-                const day = itinerary.find(d => d.id === dayId);
-                day.items = day.items.filter(i => i.id !== itemId);
-                editingItemId = null;
-                window.saveDataToLocal();
-                render();
-            });
-        };
-
-        window.moveItem = (dayId, index, direction) => {
-            const day = itinerary.find(d => d.id === dayId);
-            if (direction === 'up' && index > 0) {
-                [day.items[index - 1], day.items[index]] = [day.items[index], day.items[index - 1]];
-            } else if (direction === 'down' && index < day.items.length - 1) {
-                [day.items[index], day.items[index + 1]] = [day.items[index + 1], day.items[index]];
-            }
-            window.saveDataToLocal();
-            render();
-        };
-
-        window.resetData = () => {
-            window.showAlert("重置所有行程", "確定要清除所有修改，恢復成最初的預設行程嗎？這將無法復原。", "重置", function(confirmed) {
-                if (!confirmed) return;
-                localStorage.removeItem(STORAGE_KEY);
-                initData();
-            });
-        };
-
-        // 啟動應用程式
-        initData();
+        // 啟動應用
+        initApp();
     </script>
 </body>
 </html>
+
